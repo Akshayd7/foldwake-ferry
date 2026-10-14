@@ -1,0 +1,1830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Foldwake Ferry</title>
+  <style>
+    :root {
+      --bg-deep: #0b2228;
+      --paper-cream: #f6efe2;
+      --paper-shadow: #d5c7b2;
+      --gold-accent: #f3b852;
+      --newt-coral: #e76f51;
+      --ink-dark: #1d2d2a;
+      --water-teal: #174950;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-deep);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Georgia, serif;
+    }
+
+    #game-wrap {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg-deep);
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-wrap">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      /* ==========================================================================
+         CRASH-PROOF NUMERIC & PLATFORM UTILITIES
+         ========================================================================== */
+      function safeNum(val, fallback) {
+        const n = Number(val);
+        return Number.isFinite(n) ? n : (fallback || 0);
+      }
+
+      function clamp(val, min, max) {
+        const v = safeNum(val, min);
+        return Math.max(min, Math.min(max, v));
+      }
+
+      function lerp(a, b, t) {
+        return a + (b - a) * clamp(t, 0, 1);
+      }
+
+      function distSq(x1, y1, x2, y2) {
+        const dx = safeNum(x1, 0) - safeNum(x2, 0);
+        const dy = safeNum(y1, 0) - safeNum(y2, 0);
+        return dx * dx + dy * dy;
+      }
+
+      function safeStorageGet(key, fallback) {
+        try {
+          if (typeof window !== "undefined" && window.localStorage) {
+            const v = window.localStorage.getItem(key);
+            return v !== null ? v : fallback;
+          }
+        } catch (e) {}
+        return fallback;
+      }
+
+      function safeStorageSet(key, val) {
+        try {
+          if (typeof window !== "undefined" && window.localStorage) {
+            window.localStorage.setItem(key, String(val));
+          }
+        } catch (e) {}
+      }
+
+      /* ==========================================================================
+         SYNTHESIZED ORIGAMI RIVER AUDIO ENGINE (Zero External Assets)
+         ========================================================================== */
+      const Sound = {
+        ctx: null,
+        muted: safeStorageGet("foldwake_muted", "0") === "1",
+        musicTimer: 0,
+        noteIdx: 0,
+        scale: [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25], // C Pentatonic
+        progression: [0, 2, 4, 5, 4, 2, 1, 3, 4, 7, 5, 4, 2, 0, 1, 2],
+
+        init: function () {
+          try {
+            if (!this.ctx) {
+              const AudioCtx = window.AudioContext || window.webkitAudioContext;
+              if (typeof AudioCtx === "function") {
+                this.ctx = new AudioCtx();
+              }
+            }
+            if (this.ctx && this.ctx.state === "suspended") {
+              this.ctx.resume().catch(function () {});
+            }
+          } catch (e) {}
+        },
+
+        toggleMute: function () {
+          this.muted = !this.muted;
+          safeStorageSet("foldwake_muted", this.muted ? "1" : "0");
+          if (!this.muted) {
+            this.init();
+            this.playBell(523.25, 0.08, 0.18);
+          }
+        },
+
+        playBell: function (freq, gainVal, duration, type) {
+          if (this.muted) return;
+          try {
+            if (!this.ctx) this.init();
+            if (!this.ctx || this.ctx.state !== "running") return;
+
+            const now = this.ctx.currentTime;
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+
+            osc.type = type || "sine";
+            osc.frequency.setValueAtTime(clamp(freq, 60, 4000), now);
+
+            const g = clamp(gainVal, 0.001, 0.35);
+            const dur = clamp(duration, 0.05, 2.5);
+
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.linearRampToValueAtTime(g, now + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+
+            osc.start(now);
+            osc.stop(now + dur + 0.02);
+          } catch (e) {}
+        },
+
+        playStar: function (combo) {
+          const idx = clamp(combo, 0, 7);
+          const baseFreq = this.scale[idx] || 523.25;
+          this.playBell(baseFreq * 1.5, 0.11, 0.38, "triangle");
+          setTimeout(() => {
+            this.playBell(baseFreq * 2.0, 0.07, 0.45, "sine");
+          }, 55);
+        },
+
+        playGust: function () {
+          if (this.muted) return;
+          try {
+            if (!this.ctx) this.init();
+            if (!this.ctx || this.ctx.state !== "running") return;
+
+            const now = this.ctx.currentTime;
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(220, now);
+            osc.frequency.exponentialRampToValueAtTime(540, now + 0.22);
+
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.linearRampToValueAtTime(0.09, now + 0.04);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
+
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.28);
+          } catch (e) {}
+        },
+
+        playReedHit: function () {
+          if (this.muted) return;
+          try {
+            if (!this.ctx) this.init();
+            if (!this.ctx || this.ctx.state !== "running") return;
+
+            const now = this.ctx.currentTime;
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+
+            osc.type = "triangle";
+            osc.frequency.setValueAtTime(175, now);
+            osc.frequency.exponentialRampToValueAtTime(68, now + 0.28);
+
+            gain.gain.setValueAtTime(0.14, now);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.32);
+          } catch (e) {}
+        },
+
+        playWin: function () {
+          const notes = [523.25, 659.25, 783.99, 1046.50];
+          notes.forEach((n, i) => {
+            setTimeout(() => this.playBell(n, 0.11, 0.65, "triangle"), i * 110);
+          });
+        },
+
+        updateMusic: function (dt, isPlaying) {
+          if (this.muted || !this.ctx || this.ctx.state !== "running") return;
+          this.musicTimer += dt;
+          const stepInterval = isPlaying ? 0.42 : 0.65;
+          if (this.musicTimer >= stepInterval) {
+            this.musicTimer = 0;
+            const deg = this.progression[this.noteIdx % this.progression.length];
+            const freq = this.scale[deg % this.scale.length];
+            this.playBell(freq * 0.5, 0.032, 0.85, "sine");
+            if (this.noteIdx % 2 === 0 && isPlaying) {
+              this.playBell(freq, 0.024, 0.55, "triangle");
+            }
+            this.noteIdx++;
+          }
+        }
+      };
+
+      /* ==========================================================================
+         CANVAS & RESPONSIVE VIEWPORT SETUP
+         ========================================================================== */
+      const canvas = document.getElementById("gameCanvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+
+      let W = 390;
+      let H = 844;
+      let DPR = 1;
+
+      function resizeCanvas() {
+        try {
+          W = clamp(window.innerWidth || 390, 260, 2400);
+          H = clamp(window.innerHeight || 844, 420, 2800);
+          DPR = clamp(window.devicePixelRatio || 1, 1, 3);
+          canvas.width = Math.round(W * DPR);
+          canvas.height = Math.round(H * DPR);
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+        } catch (e) {}
+      }
+
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
+
+      /* ==========================================================================
+         GAME STATE & CONSTANTS
+         ========================================================================== */
+      const STATE_START = "START";
+      const STATE_PLAY = "PLAY";
+      const STATE_PAUSE = "PAUSE";
+      const STATE_WIN = "WIN";
+      const STATE_OVER = "OVER";
+
+      const GOAL_DISTANCE = 1000; // meters to Lantern Harbor
+
+      let gameState = STATE_START;
+      let score = 0;
+      let bestScore = Math.floor(safeNum(safeStorageGet("foldwake_best", 0), 0));
+      let starsCollected = 0;
+      let combo = 0;
+      let comboTimer = 0;
+      let distance = 0;
+      let worldTime = 0;
+      let screenShake = 0;
+      let flashAlpha = 0;
+
+      // Boat / Nori player entity
+      const boat = {
+        x: 0.5, // Normalized river coordinate [0..1]
+        vx: 0,
+        targetX: 0.5,
+        screenX: 195,
+        screenY: 640,
+        tilt: 0,
+        folds: 3, // Max 3 crisp paper folds
+        maxFolds: 3,
+        invuln: 0,
+        gustBoost: 0,
+        gustCooldown: 0,
+        noriLook: 0,
+        noriBlink: 0,
+        earFlap: 0
+      };
+
+      // World Arrays
+      let wakeTrail = [];
+      let stars = [];
+      let reeds = [];
+      let whirlpools = [];
+      let lotusPads = [];
+      let particles = [];
+      let fireflies = [];
+      let waterRibbons = [];
+      let bankDecor = [];
+
+      // Spawn timers
+      let reedTimer = 0;
+      let starTimer = 0;
+      let specialTimer = 0;
+
+      // Input tracking
+      const pointer = {
+        active: false,
+        x: 195,
+        y: 600,
+        startX: 195,
+        startY: 600,
+        boatStartX: 0.5,
+        lastTapTime: 0
+      };
+
+      const keys = { left: false, right: false };
+
+      /* ==========================================================================
+         RIVER GEOMETRY & HELPER MATH
+         ========================================================================== */
+      function getRiverBounds(y) {
+        const normY = clamp(y / Math.max(1, H), 0, 1);
+        const meander =
+          Math.sin(worldTime * 0.65 + normY * 2.6) * (W * 0.055) +
+          Math.cos(worldTime * 0.32 - normY * 1.8) * (W * 0.025);
+        const center = W * 0.5 + meander;
+        const bankWidth = Math.max(24, W * 0.095);
+        const halfRiver = Math.max(90, W * 0.5 - bankWidth);
+        return {
+          left: center - halfRiver,
+          right: center + halfRiver,
+          center: center,
+          width: halfRiver * 2
+        };
+      }
+
+      function riverNormToX(normX, y) {
+        const b = getRiverBounds(y);
+        const pad = 22;
+        return lerp(b.left + pad, b.right - pad, clamp(normX, 0.02, 0.98));
+      }
+
+      /* ==========================================================================
+         INITIALIZATION & RESET
+         ========================================================================== */
+      function initAmbientWorld() {
+        fireflies = [];
+        for (let i = 0; i < 24; i++) {
+          fireflies.push({
+            x: Math.random() * W,
+            y: Math.random() * H,
+            r: 1.5 + Math.random() * 2.2,
+            phase: Math.random() * Math.PI * 2,
+            speedY: 12 + Math.random() * 22,
+            driftX: (Math.random() - 0.5) * 18
+          });
+        }
+
+        waterRibbons = [];
+        for (let i = 0; i < 18; i++) {
+          waterRibbons.push({
+            normX: 0.08 + Math.random() * 0.84,
+            y: Math.random() * H,
+            len: 45 + Math.random() * 75,
+            speed: 1.0 + Math.random() * 0.45,
+            alpha: 0.06 + Math.random() * 0.1
+          });
+        }
+
+        bankDecor = [];
+        for (let i = 0; i < 16; i++) {
+          bankDecor.push({
+            side: i % 2 === 0 ? -1 : 1,
+            y: (i / 16) * H,
+            size: 16 + Math.random() * 18,
+            variant: i % 3
+          });
+        }
+      }
+
+      function resetGame() {
+        score = 0;
+        starsCollected = 0;
+        combo = 0;
+        comboTimer = 0;
+        distance = 0;
+        screenShake = 0;
+        flashAlpha = 0;
+
+        boat.x = 0.5;
+        boat.targetX = 0.5;
+        boat.vx = 0;
+        boat.tilt = 0;
+        boat.folds = 3;
+        boat.invuln = 0;
+        boat.gustBoost = 0;
+        boat.gustCooldown = 0;
+        boat.screenY = H * 0.76;
+        boat.screenX = riverNormToX(boat.x, boat.screenY);
+
+        wakeTrail = [];
+        stars = [];
+        reeds = [];
+        whirlpools = [];
+        lotusPads = [];
+        particles = [];
+
+        reedTimer = 0.6;
+        starTimer = 0.3;
+        specialTimer = 3.5;
+
+        // Pre-seed early stars so the river immediately invites the player
+        for (let i = 0; i < 4; i++) {
+          stars.push({
+            normX: 0.3 + i * 0.13,
+            y: H * (0.48 - i * 0.09),
+            rot: i * 0.5,
+            scale: 1,
+            golden: i === 3,
+            collected: false
+          });
+        }
+      }
+
+      initAmbientWorld();
+      resetGame();
+
+      /* ==========================================================================
+         PARTICLE & TACTILE EFFECTS
+         ========================================================================== */
+      function spawnPaperBurst(x, y, color, count, speedMult) {
+        const c = clamp(count, 1, 28);
+        const sm = safeNum(speedMult, 1);
+        for (let i = 0; i < c; i++) {
+          const ang = (Math.PI * 2 * i) / c + (Math.random() - 0.5) * 0.5;
+          const spd = (45 + Math.random() * 110) * sm;
+          particles.push({
+            x: safeNum(x, W * 0.5),
+            y: safeNum(y, H * 0.5),
+            vx: Math.cos(ang) * spd,
+            vy: Math.sin(ang) * spd - 20,
+            rot: Math.random() * Math.PI * 2,
+            vRot: (Math.random() - 0.5) * 8,
+            size: 4 + Math.random() * 5,
+            color: color || "#f6efe2",
+            alpha: 1,
+            life: 0.55 + Math.random() * 0.35,
+            maxLife: 0.85,
+            shape: i % 2 === 0 ? "diamond" : "triangle"
+          });
+        }
+      }
+
+      function triggerGustPulse() {
+        if (boat.gustCooldown > 0) return;
+        boat.gustBoost = 0.42;
+        boat.gustCooldown = 1.15;
+        boat.earFlap = 1.0;
+        Sound.playGust();
+
+        // Push nearby reeds slightly outward & pull nearby stars inward
+        const bx = boat.screenX;
+        const by = boat.screenY;
+        spawnPaperBurst(bx, by + 10, "#9be8d8", 12, 0.9);
+
+        for (let i = 0; i < reeds.length; i++) {
+          const r = reeds[i];
+          const rx = riverNormToX(r.normX, r.y);
+          const d2 = distSq(bx, by, rx, r.y);
+          if (d2 < 140 * 140) {
+            r.swayVel += (rx < bx ? -1 : 1) * 4.5;
+          }
+        }
+      }
+
+      /* ==========================================================================
+         SPAWNERS (Reeds, Paper Stars, Origami Lotus, Whirlpools)
+         ========================================================================== */
+      function spawnStarPattern() {
+        const pattern = Math.random();
+        const baseNorm = 0.18 + Math.random() * 0.64;
+
+        if (pattern < 0.45) {
+          // Graceful S-curve ribbon of 4 stars
+          const dir = Math.random() < 0.5 ? 1 : -1;
+          for (let i = 0; i < 4; i++) {
+            stars.push({
+              normX: clamp(baseNorm + Math.sin(i * 0.9) * 0.16 * dir, 0.1, 0.9),
+              y: -30 - i * 54,
+              rot: Math.random() * Math.PI,
+              scale: 1,
+              golden: i === 3 && Math.random() < 0.45,
+              collected: false
+            });
+          }
+        } else if (pattern < 0.8) {
+          // Diagonal trio
+          const step = (Math.random() < 0.5 ? 1 : -1) * 0.11;
+          for (let i = 0; i < 3; i++) {
+            stars.push({
+              normX: clamp(baseNorm + i * step, 0.12, 0.88),
+              y: -30 - i * 58,
+              rot: Math.random() * Math.PI,
+              scale: 1,
+              golden: false,
+              collected: false
+            });
+          }
+        } else {
+          // High-value Origami Crane Star flanked by two guards
+          stars.push({
+            normX: baseNorm,
+            y: -45,
+            rot: 0,
+            scale: 1.25,
+            golden: true,
+            collected: false
+          });
+        }
+      }
+
+      function spawnReedCluster() {
+        const progress = clamp(distance / GOAL_DISTANCE, 0, 1);
+        const count = progress > 0.55 && Math.random() < 0.45 ? 2 : 1;
+
+        let firstNorm = 0.14 + Math.random() * 0.72;
+        for (let c = 0; c < count; c++) {
+          let normX = c === 0 ? firstNorm : clamp(firstNorm + (Math.random() < 0.5 ? -0.34 : 0.34), 0.12, 0.88);
+          // Avoid overlapping directly on top of first cluster
+          if (c === 1 && Math.abs(normX - firstNorm) < 0.24) {
+            normX = clamp(firstNorm + 0.32, 0.12, 0.88);
+          }
+
+          reeds.push({
+            normX: normX,
+            y: -50 - c * 40,
+            radius: 20 + Math.random() * 6,
+            sway: Math.random() * Math.PI * 2,
+            swayVel: 0,
+            stems: 4 + Math.floor(Math.random() * 3),
+            hit: false
+          });
+        }
+      }
+
+      function spawnSpecialFeature() {
+        // If player is missing a fold, bias toward spawning a healing Origami Lotus
+        if (boat.folds < boat.maxFolds && Math.random() < 0.55) {
+          lotusPads.push({
+            normX: 0.2 + Math.random() * 0.6,
+            y: -45,
+            rot: Math.random() * Math.PI * 2,
+            collected: false
+          });
+        } else {
+          // Gentle paper whirlpool current that tugs the boat sideways
+          whirlpools.push({
+            normX: 0.22 + Math.random() * 0.56,
+            y: -60,
+            radius: 54,
+            rot: 0,
+            dir: Math.random() < 0.5 ? 1 : -1
+          });
+        }
+      }
+
+      /* ==========================================================================
+         UI HITBOX HELPERS (Respecting Top-Right 15% HUD-Safe Camera Zone)
+         ========================================================================== */
+      function getHudButtons() {
+        // Top-Left cluster ONLY: leaves Top-Right ~15%+ completely unobstructed for Snapchat facecam
+        return {
+          pause: { x: 16, y: 16, w: 42, h: 42 },
+          mute: { x: 66, y: 16, w: 42, h: 42 }
+        };
+      }
+
+      function getModalButton() {
+        const bw = Math.min(240, W * 0.68);
+        const bh = 54;
+        const hasSecondary = gameState === STATE_PAUSE;
+        const cardH = hasSecondary ? 345 : 305;
+        const bottomOffset = hasSecondary ? 124 : 76;
+        return {
+          x: (W - bw) * 0.5,
+          y: H * 0.5 - cardH * 0.5 + cardH - bottomOffset,
+          w: bw,
+          h: bh
+        };
+      }
+
+      function getSecondaryModalButton() {
+        const bw = Math.min(200, W * 0.56);
+        const bh = 44;
+        const primary = getModalButton();
+        return {
+          x: (W - bw) * 0.5,
+          y: primary.y + 62,
+          w: bw,
+          h: bh
+        };
+      }
+
+      function insideBox(px, py, box) {
+        return (
+          px >= box.x &&
+          px <= box.x + box.w &&
+          py >= box.y &&
+          py <= box.y + box.h
+        );
+      }
+
+      /* ==========================================================================
+         INPUT HANDLERS (Touch-Primary + Mouse/Keyboard Fallback)
+         ========================================================================== */
+      function handlePointerDown(clientX, clientY) {
+        try {
+          Sound.init();
+          const rect = canvas.getBoundingClientRect();
+          const px = clamp(clientX - rect.left, 0, W);
+          const py = clamp(clientY - rect.top, 0, H);
+
+          const btns = getHudButtons();
+
+          // Always check Mute button
+          if (insideBox(px, py, btns.mute)) {
+            Sound.toggleMute();
+            return;
+          }
+
+          // Check Pause button during gameplay or pause
+          if (gameState === STATE_PLAY || gameState === STATE_PAUSE) {
+            if (insideBox(px, py, btns.pause)) {
+              gameState = gameState === STATE_PLAY ? STATE_PAUSE : STATE_PLAY;
+              Sound.playBell(440, 0.07, 0.2);
+              return;
+            }
+          }
+
+          // Modal interactions
+          if (gameState === STATE_START) {
+            const playBtn = getModalButton();
+            if (insideBox(px, py, playBtn) || py > H * 0.35) {
+              resetGame();
+              gameState = STATE_PLAY;
+              Sound.playBell(523.25, 0.1, 0.35);
+            }
+            return;
+          }
+
+          if (gameState === STATE_PAUSE) {
+            const resumeBtn = getModalButton();
+            const restartBtn = getSecondaryModalButton();
+            if (insideBox(px, py, resumeBtn)) {
+              gameState = STATE_PLAY;
+              Sound.playBell(523.25, 0.08, 0.25);
+              return;
+            }
+            if (insideBox(px, py, restartBtn)) {
+              resetGame();
+              gameState = STATE_PLAY;
+              Sound.playBell(392.0, 0.09, 0.3);
+              return;
+            }
+            return;
+          }
+
+          if (gameState === STATE_WIN || gameState === STATE_OVER) {
+            const againBtn = getModalButton();
+            if (insideBox(px, py, againBtn)) {
+              resetGame();
+              gameState = STATE_PLAY;
+              Sound.playBell(523.25, 0.1, 0.35);
+            }
+            return;
+          }
+
+          // Active Gameplay Steering + Double-Tap Wind Gust
+          if (gameState === STATE_PLAY) {
+            const now = performance.now();
+            if (now - pointer.lastTapTime < 280) {
+              triggerGustPulse();
+            }
+            pointer.lastTapTime = now;
+
+            pointer.active = true;
+            pointer.x = px;
+            pointer.y = py;
+            pointer.startX = px;
+            pointer.startY = py;
+            pointer.boatStartX = boat.x;
+
+            // Immediate responsive target toward finger horizontal position in river
+            const bounds = getRiverBounds(boat.screenY);
+            const directNorm = clamp((px - bounds.left) / Math.max(1, bounds.width), 0.05, 0.95);
+            boat.targetX = lerp(boat.x, directNorm, 0.65);
+          }
+        } catch (e) {}
+      }
+
+      function handlePointerMove(clientX, clientY) {
+        try {
+          if (!pointer.active || gameState !== STATE_PLAY) return;
+          const rect = canvas.getBoundingClientRect();
+          const px = clamp(clientX - rect.left, 0, W);
+          const py = clamp(clientY - rect.top, 0, H);
+
+          const dx = px - pointer.startX;
+          const bounds = getRiverBounds(boat.screenY);
+          const deltaNorm = (dx / Math.max(120, bounds.width)) * 1.15;
+          const directNorm = clamp((px - bounds.left) / Math.max(1, bounds.width), 0.04, 0.96);
+
+          // Blend relative drag and direct position for effortless 1-finger control
+          boat.targetX = clamp(lerp(pointer.boatStartX + deltaNorm, directNorm, 0.55), 0.04, 0.96);
+          pointer.x = px;
+          pointer.y = py;
+        } catch (e) {}
+      }
+
+      function handlePointerUp() {
+        pointer.active = false;
+      }
+
+      // Bind Touch & Mouse Events Safely
+      canvas.addEventListener("touchstart", function (e) {
+        try {
+          if (e.changedTouches && e.changedTouches.length > 0) {
+            handlePointerDown(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+          }
+        } catch (err) {}
+      }, { passive: true });
+
+      canvas.addEventListener("touchmove", function (e) {
+        try {
+          if (e.changedTouches && e.changedTouches.length > 0) {
+            handlePointerMove(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+          }
+        } catch (err) {}
+      }, { passive: true });
+
+      canvas.addEventListener("touchend", handlePointerUp, { passive: true });
+      canvas.addEventListener("touchcancel", handlePointerUp, { passive: true });
+
+      canvas.addEventListener("mousedown", function (e) {
+        handlePointerDown(e.clientX, e.clientY);
+      });
+      window.addEventListener("mousemove", function (e) {
+        handlePointerMove(e.clientX, e.clientY);
+      });
+      window.addEventListener("mouseup", handlePointerUp);
+
+      window.addEventListener("keydown", function (e) {
+        try {
+          if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") keys.left = true;
+          if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") keys.right = true;
+          if (e.key === " " || e.key === "ArrowUp") {
+            if (gameState === STATE_PLAY) triggerGustPulse();
+            else if (gameState === STATE_START || gameState === STATE_WIN || gameState === STATE_OVER) {
+              resetGame();
+              gameState = STATE_PLAY;
+            }
+          }
+          if (e.key === "p" || e.key === "P" || e.key === "Escape") {
+            if (gameState === STATE_PLAY) gameState = STATE_PAUSE;
+            else if (gameState === STATE_PAUSE) gameState = STATE_PLAY;
+          }
+        } catch (err) {}
+      });
+
+      window.addEventListener("keyup", function (e) {
+        try {
+          if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") keys.left = false;
+          if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") keys.right = false;
+        } catch (err) {}
+      });
+
+      /* ==========================================================================
+         MAIN SIMULATION UPDATE
+         ========================================================================== */
+      function update(dt) {
+        worldTime += dt;
+        Sound.updateMusic(dt, gameState === STATE_PLAY);
+
+        // Ambient fireflies & water ribbons always animate for living river feel
+        for (let i = 0; i < fireflies.length; i++) {
+          const f = fireflies[i];
+          f.y -= f.speedY * dt;
+          f.x += Math.sin(worldTime * 1.5 + f.phase) * f.driftX * dt;
+          if (f.y < -10) {
+            f.y = H + 10;
+            f.x = Math.random() * W;
+          }
+        }
+
+        const baseRiverSpeed = gameState === STATE_PLAY
+          ? (185 + clamp(distance / GOAL_DISTANCE, 0, 1) * 95) * (boat.gustBoost > 0 ? 1.38 : 1.0)
+          : 75;
+
+        for (let i = 0; i < waterRibbons.length; i++) {
+          const r = waterRibbons[i];
+          r.y += baseRiverSpeed * r.speed * dt;
+          if (r.y - r.len > H + 20) {
+            r.y = -r.len;
+            r.normX = 0.08 + Math.random() * 0.84;
+          }
+        }
+
+        for (let i = 0; i < bankDecor.length; i++) {
+          const bd = bankDecor[i];
+          bd.y += baseRiverSpeed * dt;
+          if (bd.y > H + 40) {
+            bd.y = -40;
+          }
+        }
+
+        // Update particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i];
+          p.life -= dt;
+          if (p.life <= 0) {
+            particles.splice(i, 1);
+            continue;
+          }
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vy += 45 * dt;
+          p.rot += p.vRot * dt;
+          p.alpha = clamp(p.life / p.maxLife, 0, 1);
+        }
+
+        if (screenShake > 0) screenShake = Math.max(0, screenShake - dt * 28);
+        if (flashAlpha > 0) flashAlpha = Math.max(0, flashAlpha - dt * 2.2);
+
+        if (gameState !== STATE_PLAY) {
+          // Gentle idle bob on start/pause screen
+          boat.screenY = H * 0.76 + Math.sin(worldTime * 2.5) * 4;
+          boat.screenX = riverNormToX(boat.x, boat.screenY);
+          return;
+        }
+
+        // Only active gameplay advances the voyage; pause keeps distance and hazards still.
+        distance += (baseRiverSpeed * 0.036) * dt;
+        if (distance >= GOAL_DISTANCE) {
+          distance = GOAL_DISTANCE;
+          score += boat.folds * 150;
+          if (score > bestScore) {
+            bestScore = score;
+            safeStorageSet("foldwake_best", bestScore);
+          }
+          spawnPaperBurst(boat.screenX, boat.screenY - 20, "#f3b852", 26, 1.4);
+          Sound.playWin();
+          gameState = STATE_WIN;
+          return;
+        }
+
+        // Keyboard fallback steering
+        if (keys.left) boat.targetX = clamp(boat.targetX - 0.85 * dt, 0.04, 0.96);
+        if (keys.right) boat.targetX = clamp(boat.targetX + 0.85 * dt, 0.04, 0.96);
+
+        // Cooldowns & timers
+        if (boat.invuln > 0) boat.invuln = Math.max(0, boat.invuln - dt);
+        if (boat.gustBoost > 0) boat.gustBoost = Math.max(0, boat.gustBoost - dt);
+        if (boat.gustCooldown > 0) boat.gustCooldown = Math.max(0, boat.gustCooldown - dt);
+        if (boat.earFlap > 0) boat.earFlap = Math.max(0, boat.earFlap - dt * 2.5);
+
+        if (comboTimer > 0) {
+          comboTimer -= dt;
+          if (comboTimer <= 0) combo = 0;
+        }
+
+        // Whirlpool pull physics
+        for (let i = whirlpools.length - 1; i >= 0; i--) {
+          const wp = whirlpools[i];
+          wp.y += baseRiverSpeed * dt;
+          wp.rot += wp.dir * 3.2 * dt;
+          const wx = riverNormToX(wp.normX, wp.y);
+          const dx = wx - boat.screenX;
+          const dy = wp.y - boat.screenY;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < wp.radius * 2.1 && dist > 4) {
+            const pull = (1 - dist / (wp.radius * 2.1)) * 0.42 * dt;
+            boat.targetX = clamp(boat.targetX + Math.sign(dx) * pull, 0.05, 0.95);
+          }
+          if (wp.y > H + 80) whirlpools.splice(i, 1);
+        }
+
+        // Smooth spring boat motion
+        const prevX = boat.x;
+        boat.x = lerp(boat.x, boat.targetX, clamp(dt * 10.5, 0, 1));
+        boat.vx = (boat.x - prevX) / Math.max(0.001, dt);
+        boat.tilt = clamp(lerp(boat.tilt, boat.vx * 0.55, dt * 12), -0.48, 0.48);
+        boat.noriLook = clamp(lerp(boat.noriLook, boat.vx * 8, dt * 10), -6, 6);
+
+        boat.screenY = H * 0.76 - (boat.gustBoost > 0 ? 14 : 0);
+        boat.screenX = riverNormToX(boat.x, boat.screenY);
+
+        // Record paper ribbon wake trail
+        wakeTrail.unshift({
+          x: boat.screenX,
+          y: boat.screenY + 18,
+          tilt: boat.tilt,
+          width: 14 + (boat.gustBoost > 0 ? 7 : 0)
+        });
+        for (let i = 0; i < wakeTrail.length; i++) {
+          wakeTrail[i].y += baseRiverSpeed * dt;
+          wakeTrail[i].width += 22 * dt;
+        }
+        if (wakeTrail.length > 26) wakeTrail.length = 26;
+
+        // Spawning cadence
+        reedTimer -= dt;
+        if (reedTimer <= 0) {
+          spawnReedCluster();
+          const difficulty = clamp(distance / GOAL_DISTANCE, 0, 1);
+          reedTimer = lerp(1.35, 0.78, difficulty) + Math.random() * 0.25;
+        }
+
+        starTimer -= dt;
+        if (starTimer <= 0) {
+          spawnStarPattern();
+          starTimer = 1.65 + Math.random() * 0.5;
+        }
+
+        specialTimer -= dt;
+        if (specialTimer <= 0) {
+          spawnSpecialFeature();
+          specialTimer = 5.2 + Math.random() * 2.5;
+        }
+
+        // Update & collect Paper Stars
+        const magnetRange = boat.gustBoost > 0 ? 92 : 52;
+        for (let i = stars.length - 1; i >= 0; i--) {
+          const s = stars[i];
+          s.y += baseRiverSpeed * dt;
+          s.rot += 1.8 * dt;
+
+          let sx = riverNormToX(s.normX, s.y);
+          const dx = boat.screenX - sx;
+          const dy = boat.screenY - s.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+
+          // Gentle magnetic pull when Nori sails close
+          if (d < magnetRange && d > 1) {
+            const pullStrength = (1 - d / magnetRange) * 6.5 * dt;
+            s.normX = clamp(s.normX + (dx / W) * pullStrength, 0.04, 0.96);
+            sx = riverNormToX(s.normX, s.y);
+          }
+
+          if (d < 31) {
+            starsCollected++;
+            combo = Math.min(combo + 1, 8);
+            comboTimer = 2.8;
+            const pts = (s.golden ? 30 : 10) * combo;
+            score += pts;
+            if (score > bestScore) {
+              bestScore = score;
+              safeStorageSet("foldwake_best", bestScore);
+            }
+            boat.earFlap = 0.7;
+            spawnPaperBurst(sx, s.y, s.golden ? "#ffd166" : "#fff3d1", s.golden ? 16 : 9, 0.85);
+            Sound.playStar(combo);
+            stars.splice(i, 1);
+            continue;
+          }
+
+          if (s.y > H + 50) stars.splice(i, 1);
+        }
+
+        // Update & collect healing Origami Lotus Pads
+        for (let i = lotusPads.length - 1; i >= 0; i--) {
+          const lp = lotusPads[i];
+          lp.y += baseRiverSpeed * dt;
+          lp.rot += 0.9 * dt;
+          const lx = riverNormToX(lp.normX, lp.y);
+          const d2 = distSq(boat.screenX, boat.screenY, lx, lp.y);
+
+          if (d2 < 36 * 36) {
+            if (boat.folds < boat.maxFolds) {
+              boat.folds++;
+            } else {
+              score += 75;
+            }
+            spawnPaperBurst(lx, lp.y, "#ff9ebb", 16, 1.0);
+            Sound.playBell(659.25, 0.12, 0.45, "triangle");
+            lotusPads.splice(i, 1);
+            continue;
+          }
+
+          if (lp.y > H + 60) lotusPads.splice(i, 1);
+        }
+
+        // Update & collide with Reeds
+        for (let i = reeds.length - 1; i >= 0; i--) {
+          const r = reeds[i];
+          r.y += baseRiverSpeed * dt;
+          r.sway += 2.6 * dt + r.swayVel * dt;
+          r.swayVel *= Math.pow(0.15, dt);
+
+          const rx = riverNormToX(r.normX, r.y) + Math.sin(r.sway) * 5;
+          const dx = boat.screenX - rx;
+          const dy = boat.screenY - r.y;
+          const hitDist = r.radius + 13;
+
+          if (!r.hit && dx * dx + dy * dy < hitDist * hitDist) {
+            r.hit = true;
+            r.swayVel = dx > 0 ? -9 : 9;
+
+            if (boat.invuln <= 0 && boat.gustBoost <= 0) {
+              boat.folds--;
+              boat.invuln = 1.35;
+              combo = 0;
+              comboTimer = 0;
+              screenShake = 9;
+              flashAlpha = 0.35;
+              spawnPaperBurst(boat.screenX, boat.screenY, "#f6efe2", 14, 1.1);
+              Sound.playReedHit();
+
+              // Gentle bounce away from reed
+              boat.targetX = clamp(boat.x + (dx >= 0 ? 0.12 : -0.12), 0.08, 0.92);
+
+              if (boat.folds <= 0) {
+                if (score > bestScore) {
+                  bestScore = score;
+                  safeStorageSet("foldwake_best", bestScore);
+                }
+                gameState = STATE_OVER;
+                return;
+              }
+            } else {
+              // Brushed past with wind gust active!
+              score += 15;
+              spawnPaperBurst(rx, r.y, "#84d9ba", 8, 0.7);
+              Sound.playBell(392.0, 0.06, 0.2, "sine");
+            }
+          }
+
+          if (r.y > H + 70) reeds.splice(i, 1);
+        }
+      }
+
+      /* ==========================================================================
+         CRAFTED ORIGAMI & LIVING RIVER RENDERING
+         ========================================================================== */
+      function drawRiverBackdrop() {
+        // Rich twilight-teal solid opaque river gradient
+        const grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, "#0d2930");
+        grad.addColorStop(0.45, "#154048");
+        grad.addColorStop(1, "#0b2228");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Layered paper-cut current ribbons
+        ctx.save();
+        for (let i = 0; i < waterRibbons.length; i++) {
+          const r = waterRibbons[i];
+          const rx = riverNormToX(r.normX, r.y);
+          ctx.strokeStyle = `rgba(172, 232, 224, ${r.alpha})`;
+          ctx.lineWidth = 2;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(rx, r.y);
+          ctx.quadraticCurveTo(
+            rx + Math.sin(worldTime * 2 + i) * 8,
+            r.y + r.len * 0.5,
+            rx,
+            r.y + r.len
+          );
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // Sculpted layered origami riverbanks (Left & Right)
+        const steps = 16;
+        const stepH = H / steps;
+
+        // Outer bank shadow layer
+        ctx.fillStyle = "#12322d";
+        for (let side = -1; side <= 1; side += 2) {
+          ctx.beginPath();
+          ctx.moveTo(side === -1 ? 0 : W, 0);
+          for (let s = 0; s <= steps; s++) {
+            const sy = s * stepH;
+            const b = getRiverBounds(sy);
+            const edgeX = side === -1 ? b.left + 8 : b.right - 8;
+            ctx.lineTo(edgeX, sy);
+          }
+          ctx.lineTo(side === -1 ? 0 : W, H);
+          ctx.closePath();
+          ctx.fill();
+        }
+
+        // Main folded moss bank layer
+        ctx.fillStyle = "#1c463a";
+        for (let side = -1; side <= 1; side += 2) {
+          ctx.beginPath();
+          ctx.moveTo(side === -1 ? 0 : W, 0);
+          for (let s = 0; s <= steps; s++) {
+            const sy = s * stepH;
+            const b = getRiverBounds(sy);
+            const zig = (s % 2 === 0 ? 4 : -4) * side;
+            const edgeX = (side === -1 ? b.left : b.right) + zig;
+            ctx.lineTo(edgeX, sy);
+          }
+          ctx.lineTo(side === -1 ? 0 : W, H);
+          ctx.closePath();
+          ctx.fill();
+
+          // Crisp cream paper trim line along water edge
+          ctx.strokeStyle = "rgba(246, 239, 226, 0.25)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        // Origami bank stones & folded shore shrubs
+        for (let i = 0; i < bankDecor.length; i++) {
+          const bd = bankDecor[i];
+          const b = getRiverBounds(bd.y);
+          const bx = bd.side === -1 ? b.left * 0.48 : b.right + (W - b.right) * 0.52;
+          ctx.save();
+          ctx.translate(bx, bd.y);
+          ctx.fillStyle = bd.variant === 0 ? "#295e4e" : bd.variant === 1 ? "#35725e" : "#d9ceb8";
+          ctx.beginPath();
+          ctx.moveTo(0, -bd.size * 0.7);
+          ctx.lineTo(bd.size * 0.65, bd.size * 0.2);
+          ctx.lineTo(-bd.size * 0.55, bd.size * 0.5);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function drawWhirlpools() {
+        for (let i = 0; i < whirlpools.length; i++) {
+          const wp = whirlpools[i];
+          const wx = riverNormToX(wp.normX, wp.y);
+          ctx.save();
+          ctx.translate(wx, wp.y);
+          ctx.rotate(wp.rot);
+
+          for (let ring = 1; ring <= 3; ring++) {
+            const rad = (wp.radius / 3) * ring;
+            ctx.strokeStyle = `rgba(180, 238, 232, ${0.28 - ring * 0.06})`;
+            ctx.lineWidth = 2.2;
+            ctx.beginPath();
+            ctx.arc(0, 0, rad, 0, Math.PI * 1.45);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+      }
+
+      function drawLotusPads() {
+        for (let i = 0; i < lotusPads.length; i++) {
+          const lp = lotusPads[i];
+          const lx = riverNormToX(lp.normX, lp.y);
+          ctx.save();
+          ctx.translate(lx, lp.y);
+          ctx.rotate(lp.rot);
+
+          // Origami green leaf base
+          ctx.fillStyle = "#489978";
+          ctx.beginPath();
+          for (let p = 0; p < 6; p++) {
+            const a = (p * Math.PI) / 3;
+            const r = p % 2 === 0 ? 18 : 13;
+            if (p === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+            else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+          }
+          ctx.closePath();
+          ctx.fill();
+
+          // Folded pink paper lotus petals (restores 1 boat fold!)
+          for (let p = 0; p < 6; p++) {
+            ctx.save();
+            ctx.rotate((p * Math.PI) / 3);
+            ctx.fillStyle = p % 2 === 0 ? "#ff9ebb" : "#ffc2d4";
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(6, -13);
+            ctx.lineTo(0, -17);
+            ctx.lineTo(-6, -13);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+
+          ctx.fillStyle = "#ffd166";
+          ctx.beginPath();
+          ctx.arc(0, 0, 4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      function drawPaperStar(s) {
+        const sx = riverNormToX(s.normX, s.y);
+        const pulse = 1 + Math.sin(worldTime * 5 + s.rot) * 0.08;
+        const rad = (s.golden ? 17 : 13) * pulse;
+
+        ctx.save();
+        ctx.translate(sx, s.y);
+
+        // Warm water reflection halo
+        const glow = ctx.createRadialGradient(0, 0, 2, 0, 0, rad * 1.9);
+        glow.addColorStop(0, s.golden ? "rgba(255, 209, 102, 0.45)" : "rgba(255, 243, 209, 0.32)");
+        glow.addColorStop(1, "rgba(255, 209, 102, 0)");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(0, 0, rad * 1.9, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.rotate(s.rot);
+
+        // Crisp 5-point 3D faceted origami star
+        const points = 5;
+        for (let i = 0; i < points * 2; i++) {
+          const a1 = (i * Math.PI) / points;
+          const a2 = ((i + 1) * Math.PI) / points;
+          const r1 = i % 2 === 0 ? rad : rad * 0.48;
+          const r2 = (i + 1) % 2 === 0 ? rad : rad * 0.48;
+
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(Math.cos(a1) * r1, Math.sin(a1) * r1);
+          ctx.lineTo(Math.cos(a2) * r2, Math.sin(a2) * r2);
+          ctx.closePath();
+
+          if (s.golden) {
+            ctx.fillStyle = i % 2 === 0 ? "#ffd166" : "#e09f3e";
+          } else {
+            ctx.fillStyle = i % 2 === 0 ? "#fff8eb" : "#e3d5be";
+          }
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+
+      function drawReedCluster(r) {
+        const rx = riverNormToX(r.normX, r.y);
+        const swayOffset = Math.sin(r.sway) * 6;
+
+        ctx.save();
+        ctx.translate(rx, r.y);
+
+        // Water ripple ring around reed base
+        ctx.strokeStyle = "rgba(246, 239, 226, 0.28)";
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.ellipse(0, 6, r.radius * 0.95, r.radius * 0.42, 0, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Dark submerged base shadow
+        ctx.fillStyle = "rgba(10, 28, 32, 0.55)";
+        ctx.beginPath();
+        ctx.ellipse(0, 5, r.radius * 0.72, r.radius * 0.32, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Origami folded reed blades & cattails
+        for (let i = 0; i < r.stems; i++) {
+          const offset = (i - (r.stems - 1) * 0.5) * 7.5;
+          const h = 28 + (i % 2) * 10;
+          const tipX = offset * 1.25 + swayOffset * (0.7 + (i % 3) * 0.2);
+
+          // Stem blade (two-tone paper fold)
+          ctx.fillStyle = i % 2 === 0 ? "#3b7a57" : "#2d6144";
+          ctx.beginPath();
+          ctx.moveTo(offset - 3, 5);
+          ctx.lineTo(tipX, -h);
+          ctx.lineTo(offset + 3, 5);
+          ctx.closePath();
+          ctx.fill();
+
+          // Cattail head on center stems
+          if (i % 2 === 0) {
+            ctx.save();
+            ctx.translate(tipX * 0.78, -h * 0.68);
+            ctx.rotate((tipX - offset) * 0.02);
+            ctx.fillStyle = "#6c462f";
+            ctx.beginPath();
+            ctx.roundRect ? ctx.roundRect(-3.2, -9, 6.4, 14, 3) : ctx.rect(-3.2, -9, 6.4, 14);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+
+        ctx.restore();
+      }
+
+      function drawWakeAndBoat() {
+        // Paper ribbon wake trail behind boat
+        if (wakeTrail.length > 1) {
+          ctx.save();
+          for (let i = 0; i < wakeTrail.length - 1; i++) {
+            const w = wakeTrail[i];
+            const ratio = 1 - i / wakeTrail.length;
+            ctx.strokeStyle = `rgba(246, 239, 226, ${ratio * 0.35})`;
+            ctx.lineWidth = 2.2 * ratio;
+
+            ctx.beginPath();
+            ctx.arc(w.x - w.width, w.y, 2, 0, Math.PI * 2);
+            ctx.moveTo(w.x - w.width, w.y);
+            ctx.lineTo(w.x - w.width * 0.55, w.y + 8);
+            ctx.moveTo(w.x + w.width, w.y);
+            ctx.lineTo(w.x + w.width * 0.55, w.y + 8);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // Blink during brief invulnerability after reed bump
+        if (boat.invuln > 0 && Math.floor(boat.invuln * 14) % 2 === 1) {
+          ctx.save();
+          ctx.globalAlpha = 0.55;
+        } else {
+          ctx.save();
+        }
+
+        ctx.translate(boat.screenX, boat.screenY);
+        ctx.rotate(boat.tilt);
+
+        // Wind Gust Aura ring if active
+        if (boat.gustBoost > 0) {
+          ctx.strokeStyle = "rgba(155, 232, 216, 0.75)";
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(0, 0, 34 + (0.42 - boat.gustBoost) * 45, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        // Boat drop shadow on water
+        ctx.fillStyle = "rgba(7, 20, 24, 0.45)";
+        ctx.beginPath();
+        ctx.moveTo(0, -30);
+        ctx.lineTo(22, 6);
+        ctx.lineTo(0, 32);
+        ctx.lineTo(-22, 6);
+        ctx.closePath();
+        ctx.fill();
+
+        // === ORIGAMI BOAT HULL (Multi-facet paper shading) ===
+        // Left Outer Wing
+        ctx.fillStyle = "#efe5d4";
+        ctx.beginPath();
+        ctx.moveTo(0, -34); // Bow tip
+        ctx.lineTo(-20, 4);
+        ctx.lineTo(0, 28);  // Stern tip
+        ctx.closePath();
+        ctx.fill();
+
+        // Right Outer Wing (slightly shaded for crisp paper crease)
+        ctx.fillStyle = "#dfd1ba";
+        ctx.beginPath();
+        ctx.moveTo(0, -34);
+        ctx.lineTo(20, 4);
+        ctx.lineTo(0, 28);
+        ctx.closePath();
+        ctx.fill();
+
+        // Inner cockpit recess
+        ctx.fillStyle = "#c4b299";
+        ctx.beginPath();
+        ctx.moveTo(0, -18);
+        ctx.lineTo(13, 3);
+        ctx.lineTo(0, 17);
+        ctx.lineTo(-13, 3);
+        ctx.closePath();
+        ctx.fill();
+
+        // Center raised paper sail peak
+        ctx.fillStyle = "#fbf7f0";
+        ctx.beginPath();
+        ctx.moveTo(0, -25);
+        ctx.lineTo(-9, 3);
+        ctx.lineTo(0, -2);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#e8dcc8";
+        ctx.beginPath();
+        ctx.moveTo(0, -25);
+        ctx.lineTo(9, 3);
+        ctx.lineTo(0, -2);
+        ctx.closePath();
+        ctx.fill();
+
+        // === NORI: THE TINY PAPER NEWT CAPTAIN ===
+        ctx.save();
+        ctx.translate(boat.noriLook * 0.4, 2);
+
+        // Folded paper tail curling at stern
+        const tailWag = Math.sin(worldTime * 9) * 3.5;
+        ctx.fillStyle = "#d95d39";
+        ctx.beginPath();
+        ctx.moveTo(-4, 8);
+        ctx.lineTo(4, 8);
+        ctx.lineTo(tailWag, 24);
+        ctx.closePath();
+        ctx.fill();
+
+        // Newt body (tangerine-coral origami diamond)
+        ctx.fillStyle = "#e76f51";
+        ctx.beginPath();
+        ctx.moveTo(0, -9);
+        ctx.lineTo(9, 2);
+        ctx.lineTo(0, 12);
+        ctx.lineTo(-9, 2);
+        ctx.closePath();
+        ctx.fill();
+
+        // Frilled paper external gills (left & right, flap on star pickup)
+        const gillAngle = Math.sin(worldTime * 6) * 0.12 + boat.earFlap * 0.45;
+        for (let side = -1; side <= 1; side += 2) {
+          ctx.save();
+          ctx.translate(side * 8, -4);
+          ctx.rotate(side * gillAngle);
+          ctx.fillStyle = "#f4a261";
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(side * 8, -5);
+          ctx.lineTo(side * 6, 1);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.beginPath();
+          ctx.moveTo(0, 2);
+          ctx.lineTo(side * 7, 0);
+          ctx.lineTo(side * 5, 5);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // Nori Head (faceted geometric crest)
+        ctx.fillStyle = "#f07c5e";
+        ctx.beginPath();
+        ctx.moveTo(0, -14);
+        ctx.lineTo(9.5, -5);
+        ctx.lineTo(0, 2);
+        ctx.lineTo(-9.5, -5);
+        ctx.closePath();
+        ctx.fill();
+
+        // Expressive bright eyes
+        ctx.fillStyle = "#1d2d2a";
+        ctx.beginPath();
+        ctx.arc(-4 + boat.noriLook * 0.15, -6, 2.1, 0, Math.PI * 2);
+        ctx.arc(4 + boat.noriLook * 0.15, -6, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Tiny white paper eye glints
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(-4.6 + boat.noriLook * 0.15, -6.7, 0.8, 0, Math.PI * 2);
+        ctx.arc(3.4 + boat.noriLook * 0.15, -6.7, 0.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+        ctx.restore();
+      }
+
+      function drawParticlesAndFireflies() {
+        // Origami confetti bursts
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+          ctx.save();
+          ctx.globalAlpha = p.alpha;
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.fillStyle = p.color;
+
+          ctx.beginPath();
+          if (p.shape === "diamond") {
+            ctx.moveTo(0, -p.size);
+            ctx.lineTo(p.size * 0.7, 0);
+            ctx.lineTo(0, p.size);
+            ctx.lineTo(-p.size * 0.7, 0);
+          } else {
+            ctx.moveTo(0, -p.size);
+            ctx.lineTo(p.size, p.size * 0.8);
+            ctx.lineTo(-p.size, p.size * 0.8);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // Golden river fireflies
+        for (let i = 0; i < fireflies.length; i++) {
+          const f = fireflies[i];
+          const glowAlpha = 0.25 + 0.35 * Math.sin(worldTime * 3 + f.phase);
+          ctx.fillStyle = `rgba(255, 224, 130, ${glowAlpha})`;
+          ctx.beginPath();
+          ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      /* ==========================================================================
+         HUD & OVERLAYS (Strictly Preserving Top-Right ~15% Camera Safe Area)
+         ========================================================================== */
+      function drawPaperButton(box, label, subfill) {
+        ctx.save();
+        // Paper shadow
+        ctx.fillStyle = "rgba(10, 26, 30, 0.45)";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(box.x + 2, box.y + 4, box.w, box.h, 12) : ctx.rect(box.x + 2, box.y + 4, box.w, box.h);
+        ctx.fill();
+
+        // Main button body
+        ctx.fillStyle = subfill || "#f6efe2";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(box.x, box.y, box.w, box.h, 12) : ctx.rect(box.x, box.y, box.w, box.h);
+        ctx.fill();
+
+        ctx.strokeStyle = "#d5c7b2";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        if (label) {
+          ctx.fillStyle = "#1d2d2a";
+          ctx.font = "700 18px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, box.x + box.w * 0.5, box.y + box.h * 0.5);
+        }
+        ctx.restore();
+      }
+
+      function drawHUD() {
+        const btns = getHudButtons();
+
+        // 1. Top-Left Pause & Mute Buttons
+        if (gameState === STATE_PLAY || gameState === STATE_PAUSE) {
+          drawPaperButton(btns.pause, "");
+          ctx.fillStyle = "#1d2d2a";
+          if (gameState === STATE_PAUSE) {
+            // Play triangle icon
+            ctx.beginPath();
+            ctx.moveTo(btns.pause.x + 16, btns.pause.y + 12);
+            ctx.lineTo(btns.pause.x + 30, btns.pause.y + 21);
+            ctx.lineTo(btns.pause.x + 16, btns.pause.y + 30);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            // Pause bars
+            ctx.fillRect(btns.pause.x + 14, btns.pause.y + 13, 5, 16);
+            ctx.fillRect(btns.pause.x + 23, btns.pause.y + 13, 5, 16);
+          }
+        }
+
+        drawPaperButton(btns.mute, "");
+        ctx.save();
+        ctx.strokeStyle = "#1d2d2a";
+        ctx.fillStyle = "#1d2d2a";
+        ctx.lineWidth = 2.2;
+        const mx = btns.mute.x + 21;
+        const my = btns.mute.y + 21;
+        // Speaker cone
+        ctx.beginPath();
+        ctx.moveTo(mx - 9, my - 4);
+        ctx.lineTo(mx - 4, my - 4);
+        ctx.lineTo(mx + 2, my - 9);
+        ctx.lineTo(mx + 2, my + 9);
+        ctx.lineTo(mx - 4, my + 4);
+        ctx.lineTo(mx - 9, my + 4);
+        ctx.closePath();
+        ctx.fill();
+
+        if (Sound.muted) {
+          ctx.strokeStyle = "#d95d39";
+          ctx.beginPath();
+          ctx.moveTo(mx + 5, my - 5);
+          ctx.lineTo(mx + 12, my + 5);
+          ctx.moveTo(mx + 12, my - 5);
+          ctx.lineTo(mx + 5, my + 5);
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.arc(mx + 3, my, 5, -0.7, 0.7);
+          ctx.stroke();
+        }
+        ctx.restore();
+
+        // 2. Top-Left / Center-Left Score & Boat Folds Banner
+        // Explicitly stays within X: 16..76% width so the Top-Right ~20% is 100% clear for Snapchat facecam
+        ctx.save();
+        const hudX = 16;
+        const hudY = 66;
+        ctx.fillStyle = "rgba(13, 38, 44, 0.74)";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(hudX, hudY, 174, 54, 12) : ctx.rect(hudX, hudY, 174, 54);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(246, 239, 226, 0.22)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Score readout
+        ctx.fillStyle = "#f6efe2";
+        ctx.font = "700 20px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(`${score}`, hudX + 12, hudY + 8);
+
+        if (combo > 1) {
+          ctx.fillStyle = "#ffd166";
+          ctx.font = "700 13px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText(`x${combo} STARWAKE`, hudX + 82, hudY + 12);
+        } else {
+          ctx.fillStyle = "rgba(246, 239, 226, 0.65)";
+          ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText(`BEST ${bestScore}`, hudX + 82, hudY + 12);
+        }
+
+        // 3 Crisp Origami Boat Fold icons (Health)
+        for (let i = 0; i < boat.maxFolds; i++) {
+          const fx = hudX + 20 + i * 26;
+          const fy = hudY + 40;
+          ctx.fillStyle = i < boat.folds ? "#f6efe2" : "rgba(246, 239, 226, 0.2)";
+          ctx.beginPath();
+          ctx.moveTo(fx, fy - 7);
+          ctx.lineTo(fx + 10, fy + 3);
+          ctx.lineTo(fx - 10, fy + 3);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // 3. Harbor Journey Progress Bar (Centered horizontally, shifted slightly left of top-right facecam zone)
+        if (gameState === STATE_PLAY || gameState === STATE_PAUSE) {
+          const barW = Math.min(180, W * 0.42);
+          const barX = clamp(120, 116, W * 0.82 - barW);
+          const barY = 28;
+          const prog = clamp(distance / GOAL_DISTANCE, 0, 1);
+
+          ctx.save();
+          ctx.fillStyle = "rgba(13, 38, 44, 0.72)";
+          ctx.beginPath();
+          ctx.roundRect ? ctx.roundRect(barX, barY, barW, 18, 9) : ctx.rect(barX, barY, barW, 18);
+          ctx.fill();
+
+          ctx.fillStyle = "#f3b852";
+          ctx.beginPath();
+          const fillW = Math.max(12, barW * prog);
+          ctx.roundRect ? ctx.roundRect(barX, barY, fillW, 18, 9) : ctx.rect(barX, barY, fillW, 18);
+          ctx.fill();
+
+          ctx.fillStyle = "#1d2d2a";
+          ctx.font = "700 10px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`HARBOR ${Math.floor(prog * 100)}%`, barX + barW * 0.5, barY + 9.5);
+          ctx.restore();
+        }
+      }
+
+      function drawModalCard(title, subtitle, statLine1, statLine2, primaryText, secondaryText) {
+        ctx.save();
+        ctx.fillStyle = "rgba(8, 22, 26, 0.62)";
+        ctx.fillRect(0, 0, W, H);
+
+        const cardW = Math.min(330, W * 0.86);
+        const cardH = secondaryText ? 345 : 305;
+        const cardX = (W - cardW) * 0.5;
+        const cardY = H * 0.5 - cardH * 0.5;
+
+        // Layered origami card backing
+        ctx.fillStyle = "#d5c7b2";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(cardX + 5, cardY + 7, cardW, cardH, 18) : ctx.rect(cardX + 5, cardY + 7, cardW, cardH);
+        ctx.fill();
+
+        ctx.fillStyle = "#f6efe2";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(cardX, cardY, cardW, cardH, 18) : ctx.rect(cardX, cardY, cardW, cardH);
+        ctx.fill();
+
+        // Decorative corner paper fold
+        ctx.fillStyle = "#e3d5be";
+        ctx.beginPath();
+        ctx.moveTo(cardX + cardW - 36, cardY);
+        ctx.lineTo(cardX + cardW, cardY + 36);
+        ctx.lineTo(cardX + cardW - 36, cardY + 36);
+        ctx.closePath();
+        ctx.fill();
+
+        // Title & Copy
+        ctx.fillStyle = "#1d2d2a";
+        ctx.textAlign = "center";
+        ctx.font = "800 28px Georgia, serif";
+        ctx.fillText(title, W * 0.5, cardY + 52);
+
+        ctx.fillStyle = "#455e59";
+        ctx.font = "600 14px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText(subtitle, W * 0.5, cardY + 84);
+
+        if (statLine1) {
+          ctx.fillStyle = "#1d2d2a";
+          ctx.font = "700 16px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText(statLine1, W * 0.5, cardY + 125);
+        }
+        if (statLine2) {
+          ctx.fillStyle = "#5c746f";
+          ctx.font = "600 14px -apple-system, BlinkMacSystemFont, sans-serif";
+          ctx.fillText(statLine2, W * 0.5, cardY + 152);
+        }
+
+        const primaryBtn = getModalButton();
+        primaryBtn.y = cardY + cardH - (secondaryText ? 124 : 76);
+        drawPaperButton(primaryBtn, primaryText, "#f3b852");
+
+        if (secondaryText) {
+          const secBtn = getSecondaryModalButton();
+          secBtn.y = primaryBtn.y + 62;
+          drawPaperButton(secBtn, secondaryText, "#e8dcc8");
+        }
+
+        ctx.restore();
+      }
+
+      /* ==========================================================================
+         MAIN RENDER LOOP
+         ========================================================================== */
+      let lastTime = performance.now();
+
+      function frame(now) {
+        try {
+          const dt = clamp((now - lastTime) / 1000, 0.001, 0.05);
+          lastTime = now;
+
+          update(dt);
+
+          ctx.save();
+          if (screenShake > 0) {
+            const sx = (Math.random() - 0.5) * screenShake;
+            const sy = (Math.random() - 0.5) * screenShake;
+            ctx.translate(sx, sy);
+          }
+
+          drawRiverBackdrop();
+          drawWhirlpools();
+          drawLotusPads();
+
+          for (let i = 0; i < stars.length; i++) {
+            drawPaperStar(stars[i]);
+          }
+
+          for (let i = 0; i < reeds.length; i++) {
+            drawReedCluster(reeds[i]);
+          }
+
+          drawWakeAndBoat();
+          drawParticlesAndFireflies();
+
+          if (flashAlpha > 0) {
+            ctx.fillStyle = `rgba(246, 239, 226, ${flashAlpha})`;
+            ctx.fillRect(0, 0, W, H);
+          }
+
+          ctx.restore();
+
+          // Draw HUD & Overlays
+          drawHUD();
+
+          if (gameState === STATE_START) {
+            drawModalCard(
+              "Foldwake Ferry",
+              "Guide Nori's paper boat to Lantern Harbor",
+              "Drag anywhere to steer through the reeds",
+              "Double-tap for a Wind Gust • Collect Paper Stars",
+              "SET SAIL"
+            );
+          } else if (gameState === STATE_PAUSE) {
+            drawModalCard(
+              "River Paused",
+              "Nori rests in an eddy",
+              `Score: ${score}  •  Stars: ${starsCollected}`,
+              `Harbor Distance: ${Math.floor((distance / GOAL_DISTANCE) * 100)}%`,
+              "RESUME VOYAGE",
+              "RESTART"
+            );
+          } else if (gameState === STATE_WIN) {
+            drawModalCard(
+              "Harbor Reached!",
+              "Nori sailed safely into Lantern Harbor",
+              `Final Score: ${score}  (Best: ${bestScore})`,
+              `Paper Stars: ${starsCollected}  •  Folds Intact: ${boat.folds}/3`,
+              "SAIL AGAIN"
+            );
+          } else if (gameState === STATE_OVER) {
+            drawModalCard(
+              "Unfolded!",
+              "The reeds soaked Nori's paper hull",
+              `Score: ${score}  (Best: ${bestScore})`,
+              `Reached ${Math.floor((distance / GOAL_DISTANCE) * 100)}% of Lantern Harbor`,
+              "REFOLD & RETRY"
+            );
+          }
+        } catch (e) {}
+
+        requestAnimationFrame(frame);
+      }
+
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
